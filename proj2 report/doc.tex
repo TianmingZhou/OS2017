@@ -1,0 +1,568 @@
+\documentclass{article}
+\usepackage{amsmath,amsfonts,amsthm,amssymb}
+\usepackage{fancyhdr}
+\usepackage{extramarks}
+\usepackage{chngpage}
+\usepackage{color}
+\usepackage{graphicx,float}
+
+\title{OS Project 2 Documentation}
+%\date{}
+\author{Tianming Zhou\ 2014011393}
+
+% In case you need to adjust margins:
+\topmargin=-0.45in      %
+\evensidemargin=0in     %
+\oddsidemargin=0in      %
+\textwidth=6.5in        %
+\textheight=9.0in       %
+\headsep=0.25in         %
+
+\begin{document}
+\maketitle \thispagestyle{empty}
+
+\section{Task 1: System Call -- File And }
+
+\subsection{Brief Description of Implementation}
+
+\begin{itemize}
+\item See section 3 for \texttt{halt}. See section 2 for address translation.
+\item 
+a non-\texttt{static} bitmap array \texttt{filedescriptor\_list} of type \texttt{OpenFile}, size 16, in class \texttt{UserProcess}:
+\begin{itemize}
+\item
+This array is not \texttt{static}.
+\item
+\texttt{filedescriptor\_list[i]} is non-null if and only if the file descriptor \texttt i has been allocated.
+\item
+Initially, 0 and 1 are allocated for \texttt{stdin} and \texttt{stdout}, using \texttt{UserKernel.console.openForReading()} and \texttt{UserKernel.console.openForWriting()}, respectively.
+The other 14 descriptors are set to \texttt{null}.
+\item
+The array is initialized in the constructor of class \texttt{UserProcess}.
+When the process is terminating, an \texttt{exit} is thrown and thus its handler is called.
+Then the handler call \texttt{unloadSections}, which calls \texttt{close}'s handler to close the files.
+\item
+When we request for a valid file descriptor for a file, we call \texttt{consumeFileDescriptor (OpenFile)} with the file as argument.
+The function finds the smallest idle file descriptor, say \texttt i, by traversing \texttt{filedescriptor\_list} with indices from 2 to 15.
+It sets \texttt{filedescriptor\_list[i]} to be the only argument and returns \texttt i.
+If all of the 14 descriptors have been allocated, this function returns -1.
+\item
+When a descriptor should be recycled, we call \texttt{releaseFileDescriptor (int)}.
+This function tests if the descriptor is within range from 0 to 15 and does nothing if not.
+If the descriptor is valid, no matter whether it is being used,  \texttt{filedescriptor\_list[i]} will be set to \texttt{null}.
+\item
+When we'd like to get the file corresponding to descriptor \texttt i, we call \texttt{getOpenFilefromFileDescriptor (int)}.
+This function returns \texttt{filedescriptor\_list[i]}, if \texttt i is valid, and does nothing otherwise.
+This function may returns \texttt{null}, which indicates this descriptor has not been associated with a file.
+\end{itemize}
+\item
+We maintain the status whether a file (or filename) is still open in some process, using class \texttt{UserProcess.FileReference}.
+	\begin{itemize}
+	\item
+	This class is \texttt{static}.
+	\item
+	Each object of this class has two variable: \texttt{cnt} is the number of processes that have it open, and \texttt{dlt} is true if and only if the corresponding file is to be removed.
+	\item
+	It is this class's responsibility to ask file system to delete files.
+	\item
+	When any function in this class is running, interrupt is disabled.
+	\item
+	This class maintain a \texttt{static} map from strings (filenames) to \texttt{FileReference} objects.
+	A filename is in this map if and only if some process has it open.
+	\item
+	The function \texttt{fetchFR()} is used to extract the \texttt{FileReference} for the given filename.
+	If the filename is not in the map, it maps the string to a new \texttt{FileReference} object with both variables 0 (false).
+	\item
+	The function \texttt{tryRemove} removes the filename from the map if the corresponding \texttt{cnt} is zero, and removes the file by calling \texttt{UserKernel.fileSystem.remove}, if \texttt{cnt} is zero and \texttt{dlt} is true.
+	This function returns -1 if it fails, 1 if the file is deleted immediately, and 0 otherwise.
+	A return $\geq0$ is considered as success.
+	\item
+	When a file is referred somewhere, function \texttt{refer(String)} should be called.
+	Firstly, this function fetchs the \texttt{FileReference} object, and then it increases \texttt{cnt} by 1 if \texttt{dlt} is false.
+	This function returns the negation of \texttt{dlt}.
+	\item
+	When a file reference is closed, function \texttt{derefer(String)} should be called.
+	This function fetchs the \texttt{FileReference} object, decreases \texttt{cnt} by 1, and calls \texttt{tryRemove}.
+	A negative \texttt{cnt} throws an internal exception.
+	\item
+	When we want to delete a file, we call \texttt{unlink}.
+	This function fetchs the  \texttt{FileReference} object, set \texttt{dlt} to true, and calls \texttt{tryRemove}.
+	\end{itemize}
+\item
+We placed all system call handler in class \texttt{UserProcess}. See \texttt{handleSyscall} for their names.
+\item
+We uses \texttt{UserKernel.fileSystem} as the file system.
+\item \texttt{creat} and \texttt{open}:
+\begin{itemize}
+\item
+We handle the two system calls together.
+This handler returns -1 if one of the following conditions is satisfied:
+\begin{itemize}
+\item
+The input address is negative;
+\item
+\texttt{readVirtualMemoryString} returns \texttt{null}. This happens if the filename is empty string, if the filename is too long, and if the address is too large, etc;
+\item
+The file is to be deleted, i.e., \texttt{FileReference.refer (filename)} returns true;
+\item
+The file can not be opened by \texttt{UserKernel.fileSystem.open ()}, i.e., it returns a null \texttt{OpenFile};
+\item
+We are unable to find an idle file descriptor within range from 2 to 15.
+\end{itemize}
+\item
+When we fail, rollback may be necessary: calls to \texttt{FileReference.derefer (filename)} and \texttt{OpenFile.close()}.
+\item
+A pitfall is that the original file in the disk is overrided when the second argument of \texttt{UserKernel.fileSystem.open ()} is true.
+Therefore, we first test opening the file with the argument false.
+If we fail, we try again with it true.
+If we also fail, we do fail.
+\end{itemize}
+\item
+\texttt{read}:
+\begin{itemize}
+\item
+This handler returns -1 if the given address is minus or if the descriptor is invalid or idle.
+Reading from file less than \texttt{count} bytes does \emph{not} cause this to return -1, but writing less bytes than \emph{reading} (instead of \texttt{count}) to buffer \emph{is} an error.
+\item
+We extract the \texttt{OpenFile} object, read data from the file to an internal buffer by \texttt{OpenFile.read()}, and write it to input buffer by \texttt{writeVirtualMemory}.
+\item
+We return the value \texttt{writeVirtualMemory} returns directly.
+\end{itemize}
+\item
+\texttt{write}
+\begin{itemize}
+\item
+This handler returns -1 if the given address is minus, if the descriptor is invalid or idle, and if we can't read enough bytes from buffer or we can't write enough bytes to file.
+\item
+We extract the \texttt{OpenFile} object, read data to an internal buffer by \texttt{readVirtualMemory} and write it to file by \texttt{OpenFile.write()}.
+\item
+We return the argument \texttt{count} if both \texttt{readVirtualMemory} and  \texttt{OpenFile.write()} return that value, and -1 otherwise.
+If both \texttt{readVirtualMemory} does not return \texttt{count}, \texttt{OpenFile.write()} will not be called.
+\end{itemize}
+\item
+\texttt{close}
+\begin{itemize}
+\item
+This handler returns -1 if the descriptor is invalid or idle.
+\item
+We extract the \texttt{OpenFile} object, store its filename, call \texttt{OpenFile.close()} to close it, recycle the file descriptor.
+If the descriptor is not less than 2, we call \texttt{FileReference.derefer()} to maintain the records.
+\item
+We'd better store the filename before the file is closed, because it may be not available otherwise.
+\end{itemize}
+\item
+\texttt{unlink}
+\begin{itemize}
+\item
+This handler returns -1 if the filename is null, or if the file does not exist, etc.
+Calling this multiple times before all reference to this file are closed is equivalent to calling once.
+\item
+We just call \texttt{FileReference.unlink()} and return -1 if and only if it returns -1.
+\end{itemize}
+\end{itemize}
+
+\subsection{Test Cases}
+
+\begin{itemize}
+\item
+\texttt{UserProcess.selfTest\_Ala} tests:
+	\begin{itemize}
+	\item
+	release a file descriptor;
+	\item
+	release a file descriptor after we have release it successfully;
+	\item
+	request a file descriptor when descriptor 0 or 1 is closed;
+	\end{itemize}
+
+\item
+\texttt{test/test\_syscall5} tests closing \texttt{stdout}.
+
+\item
+\texttt{test/test\_syscall6}:
+	\begin{itemize}
+	\item
+	write to invalid (-1, 16), unallocated (5) file descriptors, to \texttt{stdin}, \texttt{stdout};
+	\item
+	creat 20 files with closing any;
+	\item
+	close files twice;
+	\item
+	creat, write and close file; open, read and close the same file;
+	\item
+	creat an existing file, write to and read from it, and close it;
+	open it and read it; (The file is partially overrided and extended to the end.)
+	\item
+	read using a string \texttt{"string"} as buffer;
+	\item
+	read with invalid (-1, 16), closed file descriptor, from \texttt{stdin};
+	\item
+	close \texttt{stdin} and then open a file;
+	\item
+	unlink non-existing file, closed file, deleted file;
+	\item
+	unlink, by multiple times, file that is opened twice, file that is opened twice and then closed once, file that is opened twice and then closed once;
+	creat and open file whose deletion is pending;
+	\item
+	two processe open one file concurrently, and use same descriptor;
+	unlink a file that another process has open;
+	unlink a file that has been opened in two processes;
+	\item
+	creat and unlink a file with a long name;
+	\item
+	close \texttt{stdout} and then write to it.
+	\end{itemize}
+\end{itemize}
+
+\section{Task 2: Address Translation}
+
+\subsection{Brief Description of Implementation}
+
+\begin{itemize}
+\item
+Similar to file descriptor, we maintain a \texttt{static} bitmap array \texttt{pageIdle} of type \texttt{boolean}, size \texttt{Machine.processor().getNumPhysPages()}, in class \texttt{UserKernel}:
+	\begin{itemize}
+	\item
+	This array is \texttt{static}.
+	\item
+	\texttt{pageIdle[i]} is true if and only it is not idle, i.e., it has been allocated for some process.
+	\item
+	The static constructor of \texttt{UserKernel} (see code) calls \texttt{initializePages} to initialize every element in this array to be true.
+	\item
+	When any function in the following is running, interrupt is disabled.
+	\item
+	\texttt{allocatePage()} should be called when we ask for free pages.
+	This function find the free page with the largest index, by traversing the array backwards. Then it set the corresponding element to \texttt{false}.
+	If there is no free pages, this function returns -1.
+	\item
+	\texttt{deallocatePage()} should be called when a page should be recycled.
+	This function set the corresponding element in the array to \texttt{true}.
+	If the given page id is out of range, an internal error is thrown.
+	\item
+	\texttt{getPageStates()} returns the status of the page, i.e., the corresponding element directly.
+	This function is for debug and test.
+	\end{itemize}
+\item
+For each process, we maintain a array \texttt{pageTable} of type \texttt{translationEntry}, size \texttt{UserProcess.numPages} to map virtual page number to physical page number:
+	\begin{itemize}
+	\item
+	This array is not \texttt{static}.
+	\item
+	This array is created and initialized in the function \texttt{loadSections()}.
+	We ask for pages one by one, using \texttt{UserKernel.allocatePage()}.
+	When physical page are insufficient, we get a -1, and then we call \texttt{unloadSections()} to release the pages allocated to the process.
+	\item
+	In the argument list of \texttt{section.loadPage()}, we replace \texttt{vpn} by \texttt{pageTable[vpn].ppn}.
+	\item
+	Just after that, we set \texttt{pageTable[vpn].readOnly} to \texttt{true} if the section if read-only.
+	\item
+	When the process is terminating, \texttt{unloadSections()} is also called to release pages, similar to closing the files above.
+	\end{itemize}
+\item
+\texttt{readVirtualMemory}:
+	\begin{itemize}
+	\item
+	This function reads data page by page.
+	For each page, it calculates the virtual page number, the index of the first byte in the page to read and the length in the page.
+	The index of the first byte equals to \texttt{vaddr} module \texttt{Processor.pageSize}.
+	The length is the smaller one between the number of bytes to read and the number of left bytes in the page.
+	\item
+	The \texttt{pageTable[i].used} is set to \texttt{true} for the related pages.
+	\item
+	When the virtual page number is negative or too large, and when the valid bit of the page table is false, we skip the read operations on this page.
+	As a result, the content in corresponding buffer is unchanged.
+	\end{itemize}
+\item
+\texttt{writeVirtualMemory} is very similar to \texttt{readVirtualMemory}, the differences are:
+	\begin{itemize}
+	\item
+	In addition, we skip write operations when the page table entry's readOnly bit is true.
+	\item
+	In addition, the dirty bits of the page table entries are set to true.
+	\item
+	The argument order to \texttt{System.arraycopy()} is partially reversed.
+	\end{itemize}
+\end{itemize}
+
+\subsection{Test Cases}
+
+\begin{itemize}
+\item
+\texttt{UserKernel.selfTest\_Page} tests page allocation and deallocation (recycle).
+We maintain the set of pages we own.
+Each round, we request a page with .5 probability and release a page in the set with .5 probability.
+None of the following should occur when we request for a page:
+	\begin{itemize}
+	\item
+	we obtain an invalid page number;
+	we obtain a page number we have already own;
+	we obtain -1 when we do not own all pages;
+	\end{itemize}
+We count the times we request for pages when we own all pages, which is nonzero with high probability.
+We count the times we request for 10 pages contiguously to simulate allocate pages for process.
+We count the times we release 10 pages contiguously to simulate allocate pages for process. (This does not know which pages belong to the same process.)
+
+\texttt{UserProcess.selfTest\_Cys} tests:
+	\begin{itemize}
+	\item
+	write to the whole memory;
+	\item
+	write to the memory starting in the middle of one page, through a whole page, and ending at the first byte of the third page;
+	\item
+	write to a whole page;
+	\item
+	write to the last byte of one page and the first byte of the next page;
+	\item
+	read the whole memory with several pages read-only;
+	\item
+	write a little data to the memory covering position -1 and 0;
+	\item
+	read a little data from the memory covering position -1 and 0;
+	\item
+	write a lot of data to the memory covering position -1 and 0;
+	\item
+	read a lot of data from the memory covering position -1 and 0;
+	\item
+	write to the whole memory with several pages in the middle read-only;
+	\item
+	write to the memory with several pages read-only in the middle / at the beginning / in the end;
+	\item
+	read string from single / multiple page(s);
+	\item
+	read string in the end of the memory with the last byte in the memory being zero / nonzero.
+	\item
+	We also test the \texttt{readOnly, used, dirty} bits after each operations and then reset them.
+	\end{itemize}
+
+\item
+\texttt{test/test\_readonly} tests:
+	\begin{itemize}
+	\item
+	read data from defined / undefined address (one or no variable is declared to occupy this address);
+	\item
+	write data to legal (defined /undefined) address;
+	\item
+	write data to illegal address, including negative address, address divided by 4 not evenly, address exceeding upper limit, and their combination.
+	\end{itemize}
+
+\item
+\texttt{test/test\_syscall4} tests recycling pages, redoing allocation when pages are insufficient, and allocating incontiguous physical pages
+\end{itemize}
+
+\section{Task 3: System Call -- Process}
+
+\subsection{Brief Description of Implementation}
+
+\begin{itemize}
+\item
+\texttt{halt}, globally unique process ID, and identity of root process:
+	\begin{itemize}
+	\item
+	We define a \texttt{final static} variable \texttt{processID4root} to 0.
+	A process is the root process if and only if its ID is this number.
+	\item
+	We define a \texttt{static} variable \texttt{ID\_next} and initialize it to \texttt{processID4root}.
+	Each time the constructor of \texttt{UserProcess} is called, the new process's id is set to \texttt{ID\_next}, and then \texttt{ID\_next} is increased by 1.
+	\item
+	It is clear that every process has a nonnegative ID.
+	\item
+	By calling \texttt{isRootProcess()}, every process is able to know whether itself is the root, based on the two variables.
+	\item
+	When the handler is called, it tests whether it is the root.
+	If it is, it calls \texttt{Machine.halt()}. If not, it returns immediately.
+	\end{itemize}
+\item
+\texttt{exit} and identity of the last process:
+	\begin{itemize}
+	\item
+	We define a set \texttt{aliveProcess} containing \texttt{Integer} to be the set of existing processes' IDs.
+	\item
+	In the constructer of \texttt{UserProcess}, the new process's ID is added to the set.
+	In the function \texttt{unloadSections()}, the ID is removed from the set.
+	\item
+	A process is the last process, when terminating, if and only if the set is empty after its ID is removed.
+	\item
+	The handler first calls \texttt{unloadSections()}, and then checks whether it is the last process.
+	It calls \texttt{Kernel.kernel.terminate()} if it is the last one, and \texttt{KThread.finish()} otherwise.
+	\item
+	When a process is determined to terminate, this handler will be called, no matter whether it terminates normally or an exception is not handled (argument is -1 in this case).
+	\end{itemize}
+\item
+\texttt{exec}
+	\begin{itemize}
+	\item
+	We do a lot of tests here: the addresses should be valid and we can read a string starting from each of them, etc
+	\item
+	For the $i$-th argument, the address is \texttt{argv+i*4}.
+	We first read 4 bytes starting from it, and then read a string from the address returned by \texttt{Lib.bytesToInt()}.
+	\item
+	Then we call \texttt{UserProcess.newUserProcess()} to obtain a new object, and call its \texttt{execute()}.
+	If \texttt{execute()} returns \texttt{true}, we add its ID to \texttt{mapID2UP} (see below), return its ID.
+	Else we remove its ID from \texttt{aliveProcess} and return -1.
+	\end{itemize}
+\item
+\texttt{join}, child process, and status:
+	\begin{itemize}
+	\item
+	We define a map \texttt{mapID2UP} from process ID to \texttt{UserProcess} object for each process.
+	A process ID is in this set if and only if the process is the current process's child.
+	\item
+	This map is initialized to empty in the constructor of \texttt{UserProcess}.
+	\item
+	We use a variable \texttt{thread} of type \texttt{UThread} to store the associated \texttt{UThread} object.
+	This variable is initialized in \texttt{execute()}.
+	\item
+	We use a variable \texttt{status} to store the return value of this process.
+	The variable is initialized to a number that is unreasonable for other people, in the constructor of \texttt{UserProcess}.
+	\item
+	The handler returns -1 if the \texttt{processID} is negative, if the address for \texttt{status} is negative, and if the corresponding process is not the current process's child.
+	However, when \texttt{status} points to a read-only region or is too large, the handler returns 0 and the return value of the child process is lost.
+	\item
+	If all tests are passed, the entry is removed from \texttt{mapID2UP} and the child's thread's \texttt{KThread.join()} is called.
+	We return 1 if the child's status is not its initial value and we write 4 bytes to \texttt{status}, and 0 otherwise.
+	\item
+	In the second time we join to a process, we will find that the process ID is not in the map and thus return -1.
+	\end{itemize}
+\end{itemize}
+
+\subsection{Test Cases}
+
+\begin{itemize}
+\item
+\texttt{test/test\_syscall1}
+	\begin{itemize}
+	\item
+	join to self, -1, unused id;
+	\item
+	join to child's child;
+	\item
+	join to child;
+	\item
+	exec with multiple arguments, invalid arguments;
+	\item
+	compete to print;
+	\item
+	exec with non-existing file, file with filename not ending with \texttt{.coff};
+	\item
+	exec with \texttt{status} not divided by 4 evenly, with large \texttt{status}, with \texttt{status} being -1;
+	\item
+	exec with \texttt{argc=-1}, \texttt{argv=-1};
+	\item
+	exec a file whose name is too long;
+	\item
+	exec with an argument that is too long.
+	\end{itemize}
+
+
+\item
+\texttt{test/test\_syscall2} tests calling \texttt{halt} from non-root process and root process.
+
+\item
+\texttt{test/test\_syscall3} tests calling \texttt{exit} from root, first process and non-root, last process.
+
+\end{itemize}
+
+\section{Task 4: Lottery Scheduler}
+
+\subsection{Brief Description of Implementation}
+
+\begin{itemize}
+\item
+Both prioirty and ticket refer to ticker here.
+\item
+We adopt identical architecture.
+Unfortunately, we modified \texttt{Queue} and \texttt{ThreadState}, so we have to override all functions.
+\item
+\texttt{priorityMinimum} is set to 1, and \texttt{priorityMaximum} is set to \texttt{Integer.MAX\_VALUE}.
+\item
+To maintain tickets, we create in each \texttt{LotteryQueue} and \texttt{ThreadState} a \texttt{SumSet} that extends \texttt{HashMap}:
+	\begin{itemize}
+	\item
+	We use a variable \texttt{sum} to maintain the sum of all elements' sum in this set.
+	\item
+	We override functions \texttt{add()} and \texttt{remove()}.
+	When any of the two functions is running, interrupt is disabled.
+	\item
+	When an object (a \texttt{LotteryQueue} or a \texttt{ThreadState}) is added or removed, we call proper function (\texttt{getDonatingPriority()} or \texttt{getEffectivePriority()}) to obtain the difference and modify \texttt{sum} by this amount.
+	\end{itemize}
+\item
+Deadlock:
+	\begin{itemize}
+	\item
+	When a deadlock forms, the \texttt{SumSet} will fall into an infinite loop.
+	\item
+	We use three \texttt{static} variables \texttt{LotteryQueue loop\_mark} and \texttt{int loop\_cnt, loop\_k} to identify such loops.
+	All are initialized to zero (\texttt{null}).
+	\item
+	\texttt{loop\_mark} is \texttt{null} if and only if we are not updating priority.
+	\item
+	The algorithm is simple.
+	Imagine we are walking in directed graph where the out-degree is at most 1 for all vertices, and we can only memorize two vertices, including our current vertex.
+	Besides, we have two counters.
+	In round $k=0,1,\ldots$, we walk $2^k$ steps and then memorize the current vertex.
+	After each step, we examine whether our current vertex is exactly the one in our memory.
+	If it is, we find a loop.
+	If the current vertex has not out-edge, we complete.
+	This algorithm terminates when $2^k$ is not less than the length of the only loop.
+	\item
+	When we update priority, we call \texttt{getDonatingPriority()} and \texttt{getEffectivePriority()} alternatively.
+	Let each \texttt{LotteryQueue} and \texttt{ThreadState} correspond a vertex.
+	If a objext transfers its tickets to another objext, form an edge from the former vertex to the latter vertex.
+	Then the out-degree is at most 1.
+	\item
+	We implement this algorithm on the graph constructed above in \texttt{LotteryScheduler.updateDonatingPriority}.
+	\item
+	When we begin to update priority, we set \texttt{loop\_mark} to the first \texttt{LotteryQueue} and set \texttt{loop\_cnt=0, loop\_k=1}.
+	This should happen if and only if we find \texttt{loop\_mark} is \texttt{null}, after we are sure we have to do update.
+	\item
+	When we find \texttt{loop\_mark} is exactly the current \texttt{LotteryQueue}, we are sure that we are in a cycle and we return immediately, setting \texttt{loop\_mark} to \texttt{null}.
+	\item
+	\texttt{loop\_cnt, loop\_k} are the number of steps we have walked in this round and the number of steps we should walk in this round.
+	If the two is the same, the round is finished and we should update the variables.
+	\item
+	When we find its end, we begin to return and reset \texttt{loop\_mark} to \texttt{null}.
+	\item
+	See code for detail. The code is really short.
+	\end{itemize}
+\item
+\texttt{LotteryQueue.pickNextThread}
+	\begin{itemize}
+	\item
+	We call \texttt{waitingQueue.getSum ()} to obtain the total number of tickets and then ask for a random number according to this number.
+	We traverse each process in \texttt{waitingQueue} by its iterator, and decrease the random number by the number of tickets the process owned.
+	We return the first process that makes the random number negative.
+	\end{itemize}
+\item
+\texttt{LotteryQueue.updateDonatingPriority}
+	\begin{itemize}
+	\item
+	A queue with \texttt{transferPriority} false donates zero tickets instead of \texttt{priorityMaximum}, so we return immediately if it is false.
+	\item
+	The new donating priority is obtained by calling \texttt{waitingQueue.getSum()}.
+	\end{itemize}
+\item
+\texttt{ThreadState.updateEffectivePriority}
+	\begin{itemize}
+	\item
+	The new priority is the sum of current process's internal ticket and \texttt{acquires.getSum()}.
+	\end{itemize}
+\end{itemize}
+
+\subsection{Test Cases}
+
+\begin{itemize}
+\item
+\texttt{LotteryScheduler.endoderm()} tests the join operation and ticket transfer via `join queue'.
+\item
+\texttt{LotteryScheduler.mesoderm()} tests \texttt{setPriority()} before exection (\texttt{fork()}).
+\item
+\texttt{LotteryScheduler.ectoderm()} tests \texttt{increasePriority()} and \texttt{decreasePriority()} during execution.
+\item
+\texttt{LotteryScheduler.methylcyclopropane()} tests deadlock.
+Namely, three threads form a cycle of size 3, with high probability.
+And then the fourth thread join one of the former 3 threads.
+This should not cause scheduler to fall into infinite loop and not to respond.
+\end{itemize}
+
+\label{LastPage}
+\end{document}

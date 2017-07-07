@@ -1,0 +1,147 @@
+\documentclass{article}
+\usepackage{amsmath,amsfonts,amsthm,amssymb}
+\usepackage{fancyhdr}
+\usepackage{extramarks}
+\usepackage{chngpage}
+\usepackage{color}
+\usepackage{graphicx,float}
+
+\title{OS Project 4 Documentation}
+%\date{}
+\author{Tianming Zhou\ 2014011393}
+
+% In case you need to adjust margins:
+\topmargin=-0.45in      %
+\evensidemargin=0in     %
+\oddsidemargin=0in      %
+\textwidth=6.5in        %
+\textheight=9.0in       %
+\headsep=0.25in         %
+
+\begin{document}
+\maketitle \thispagestyle{empty}
+
+\section{Where}
+
+blockdb\_java2 contains the code for server.
+
+\section{Architecture}
+
+I create the following classes:
+\begin{itemize}
+\item Uitl: to read and to write transactions and blocks from and to disk. And to decode the json string. Initialization and recovery may use this class to read and to parse data.
+\item Messenger: to broadcast transactions and blocks, to request blocks from other servers, and to ask for the leaf block of other servers' block tree. The last two jobs are for recovery.
+\item BlockDatabaseServer: to implement the interface of grpcs, and then to call the function for mining. This class does little of work, and calls functions of DatabaseEngine.
+\item DatabaseEngine: to process request by calling functions of BlockTree and TransactionPool. This class contributes a little to the logic.
+\item BlockTree: to maintain the block tree.
+\item BlockTree.Package: to collect the information associated with each block.
+\item BlockTree.Longest: to maintain information about the longest chain.
+\item TransactionPool: to maintain the transactions that have not been included in the longest chain.
+\end{itemize}
+
+BlockTree (BlockTree.Longest) and TransactionPool are the most significant classes.
+
+\subsection{BlockTree.Package}
+
+For each block, I store its hash, its status and a pointer to the instance of BlockTree.Package corresponding to its parent.
+The root's parent is set to null and its status is always 1.
+
+The status takes value from $\{-1,0,1\}$.
+\begin{itemize} 
+\item A +1 means it is legitimate, i.e., I can trace back to the root, or to a block that can be traced back to root and thus has status 1.
+\item A -1 means the block is illegitimate in this block tree. E.g., I can trace back to a block with zero BlockID but nonzero hash, or to enter a loop.
+\item A 0 means it is not clear so far. E.g., I can not obtain a block from this block to the root, or this block's depth is less than that of current leaf.
+\end{itemize}
+The initial value is 0. It is clear that once we assign a nonzero value to it, it will not change in the future, because we only add nodes to the tree.
+
+I use a HashMap that maps block's hash to the packages.
+
+\subsection{BlockTree.Longest}
+
+This class maintain the leaf's package, the balances of all accounts according to the chain indicated by the leaf, and a map from transactions' UUIDs in this chain to the packages the transactions belong to.
+
+I use condition variable to guarantee correctnest of concurrency.
+This is a very simple Reader-Writer problem.
+
+\subsection{BlockTree}
+
+This class maintain a map from hash to packages.
+I use condition variable to guarantee correctnest of concurrency.
+This is a very simple Reader-Writer problem.
+
+GetBlock and GetHeight are simple read-only task.
+
+For Verify, I ask the map in BlockTree.Longest with a shared lock. 
+I return SUCCEEDED or PENDING, depending the depth, and the corresponding BlockHash if the transaction's UUID is recorded in the map, and PENDING or FAILED, depending on the balance with null BlockHash otherwise.
+
+For PushBlock and recovery, the function addBlock is called.
+The time complexity is linear on the number of transactions from the old leaf and the input block to their LCA, if HashMap has $O(1)$ time complexity.
+I do not mark any transactions in a block as seen, i.e., if the block is the first time for me to see a transaction, a followed Verify on this transaction will always get a FAILED result, if and only if this block has never been in the longest chain.
+This function follows the procedure below:
+\begin{itemize}
+\item If the block is illegitimate (judged by the function checkBlock), return immediately without recording this block;
+\item If the hash has been seen, return immediately, and otherwise create a Package instance for it and write it to disk;
+\item If this block has smaller BlockID than the current leaf (or same BlockID but larger Hash), return immediately.
+\item Go up along PrevHash until a block with nonzero status is reached or no previous block is available. The statuses may be set to -1 if a illegitimate block is found, and may remain 0 if a previous block is not available so far or if no error is found. Return if a block with status 1 is not found.
+\item Go up from the leaf in BlockTree.Longest and the block with status 1 simultaneously to their LCA, creating the temperary UUID set and balances.
+\item Go down from the block with status 1, checking whether balances are enough and whether a UUID occurs more than once. Set the status of the failed block and all of blocks below it in this chain.
+\item Update the leaf if the last legitimate block in this chain beats the old leaf. And update TransactionPool.
+\end{itemize}
+
+\subsection{TransactionPool}
+
+This class maintains the block being mining, the transaction not in the longest chain or in the block being mining, and UUIDs of all legitimate I have ever seen via Transfer and PushTransfer.
+
+For Verify, the function verify tells whether the UUID has been seen, whether the UUID is consistent with the transaction I have ever seen.
+
+For Transfer and PushTransfer, addTx is called.
+If the transaction is illegitimate, or the UUID has been seen, or is in the longest chain, this function returns immediately, else the transaction is written to disk.
+If the block being mining is not full and the FromID's balance (taking the longest chain and the block being mining into consideration) is at less than its Value, add the transaction to the block.
+
+After BlockTree switches to another chain (or just extend current chain), resetMining is called.
+This function refines the transactions according to BlockTree.Longest.
+Then it calls Txpool2curblock.
+
+Txpool2curblock chooses the transactions to form a block to be mined.
+Recovery may also call this function.
+
+\section{Mining}
+
+After the server setup, TransactionPool.mining will be called and will run forever.
+Every time I try a new nonce, I build a Block instance with a shared lock, and then calculate its hash.
+If the hash passes tests, BlockTree.addBlock is called, which will cal resetMining in turn.
+
+After BlockTree.addBlock is called, and before resetMining is called, this function keeps trying different nonce.
+However, it does not matter even if a new block is produced.
+
+\section{Recovery}
+
+After initialization of BlockTree and TransactionPool.
+The two classes' recovery functions are called.
+
+At first, BlockTree.recover loads all blocks from disk. (The file name is their hash, followed by the extension `.json'.)
+Then it ask all other servers for their leaves and calls BlockTree.addBlock to verify and to choose the leaf.
+
+Nextly, TransactionPool.recover loads all transaction from disk. (The file name is their UUID.)
+
+Eventually, TranactionPool.resetMining is called to initialize the block to be mined, and TransactionPool.mining is called to begin mining.
+
+\section{Test Cases}
+
+The other two projects: testcases and createBlocks are for test.
+
+createBlocks generates all kinds of blocks (chains).
+The code is easy to understand.
+
+testcases implements a client which sends all kinds of requests to one or all servers.
+One such client along with multiple identical servers may simulate many types of message loss, server behaviours.
+The client reads commands from a row-base file.
+In each row, the first word is the server ID (-1 for all, 0 for none); the second word is the request type; the following words (may or may not all) are arguments for the command; the last argument(s) are the expected response.
+
+Please set Hash.check to check the first 4 letters when using these test cases.
+
+In commandFile\_recover, there is a sleep, during which server 1 should be stopped and re-started.
+Besides, before executing this test case, remember to delete the file on disk.
+
+\label{LastPage}
+\end{document}
